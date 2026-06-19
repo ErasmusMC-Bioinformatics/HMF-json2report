@@ -1,0 +1,429 @@
+<!DOCTYPE html>
+<html lang="nl">
+
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>WGS Rapport Converter</title>
+  <script src="https://cdn.jsdelivr.net/pyodide/v0.27.0/full/pyodide.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/docx@8.5.0/build/index.umd.js"></script>
+  <style>
+    body {
+      font-family: sans-serif;
+      max-width: 860px;
+      margin: 40px auto;
+      padding: 0 20px;
+    }
+
+    h1 {
+      font-size: 1.4rem;
+    }
+
+    #version {
+      color: #555;
+      font-style: italic;
+      margin: 10px 0;
+    }
+
+    #status {
+      color: #555;
+      font-style: italic;
+      margin: 10px 0;
+    }
+
+    #error {
+      color: red;
+      white-space: pre-wrap;
+      margin: 10px 0;
+    }
+
+    textarea {
+      width: 100%;
+      height: 640px;
+      font-family: monospace;
+      font-size: 0.85rem;
+    }
+
+    button {
+      margin-top: 10px;
+      padding: 8px 16px;
+      cursor: pointer;
+      margin-right: 8px;
+    }
+
+    .hidden {
+      display: none;
+    }
+
+    label {
+      font-weight: bold;
+    }
+
+    .btn-word {
+      background: #2b579a;
+      color: #fff;
+      border: none;
+      border-radius: 4px;
+    }
+
+    .btn-word:hover {
+      background: #1e3f72;
+    }
+
+    #privacy-warning {
+    font-size: 0.8rem;
+    color: #888;
+    margin: 4px 0 20px 0;
+    }
+
+    #privacy-warning .warning-icon {
+      font-size: 1.2rem;
+      line-height: 1.4;
+      flex-shrink: 0;
+    }
+  </style>
+</head>
+
+<body>
+  <h1>Hartwig WGS JSON → txt/docx</h1>
+  <p id="version">v1.1.0 (19.06.26)</p>
+
+  <p id="privacy-warning">🔒 Data wordt lokaal verwerkt en verlaat uw computer niet.</p>
+
+  <p id="status">Loading Pyodide...</p>
+  <p id="error"></p>
+
+  <div id="ui" class="hidden">
+    <label for="fileInput">Upload JSON bestand:</label><br /><br />
+    <input type="file" id="fileInput" accept=".json" />
+    <br /><br />
+    <button id="convertBtn" disabled>Converteer</button>
+    <br /><br />
+    <div id="outputSection" class="hidden">
+      <label>Voorbeeld:</label><br />
+      <textarea id="outputPreview"></textarea>
+      <br />
+      <button id="downloadBtn">⬇ Export: txt</button>
+      <button id="wordBtn" class="btn-word">📄 Export: Word</button>
+    </div>
+  </div>
+
+  <script type="text/javascript">
+    // ── Jinja2 template ────────────────────────────────────────────────────────
+    const TEMPLATE = `\
+{% if report.reason %}
+{% set exp = report.fail_explanation.get('reportExplanation', '') if report.fail_explanation else '' %}
+{% if 'DNA yield was insufficient after DNA isolation' in exp %}
+Aanvulling ({{ today }}): Geen uitslag whole genome sequencing (WGS) op corresponderend vriesmateriaal mogelijk vanwege onvoldoende kwaliteit
+{% elif 'tumor cell' in exp and 'percentage was too low' in exp %}
+Aanvulling ({{ today }}): Geen uitslag whole genome sequencing (WGS) op corresponderend vriesmateriaal mogelijk vanwege een te laag percentage neoplastische cellen.
+{% else %}
+LET OP: WGS analyse is mislukt ({{ report.reason }}).
+Verklaring: {{ exp if exp else 'Geen verklaring' }}
+{% endif %}
+{% else %}
+Aanvulling ({{ today }}): Uitslag whole genome sequencing (WGS) uitgevoerd door Hartwig Medical Foundation op corresponderend vriesmateriaal{% if report.genomic_analysis %} (tumor purity {{ "%.0f"|format(report.genomic_analysis.tumor_purity * 100)}}%){% endif %} onder HMF sample ID {{ report.reporting_id }}. Onderstaand een samenvatting, het volledige rapport is beschikbaar onder multimedia in HIX.
+Tumor specifieke varianten met high driver likelihood: {% if not report.genomic_analysis or not report.genomic_analysis.tumor_observed_variants %}geen
+{% else %}{{ "\n" }}{% for v in report.genomic_analysis.tumor_observed_variants %}
+- {{ v.curated_gene }} {{ v.hgvs_coding_impact }}; {{ v.hgvs_protein_impact }} (tVAF {{ v.t_vaf }}{% if v.showBiallelicMessage %}; {% if v.biallelic %}bi-allelische inactivatie{% else %}geen bi-allelische inactivatie{% endif %}{% endif %})
+{% endfor %}
+{% endif %}
+Tumorspecifieke copy number veranderingen (gains/ losses): {% if not report.genomic_analysis or not report.genomic_analysis.sorted_gains_and_losses %}geen
+{% else %}{{ "\n" }}{% for g in report.genomic_analysis.sorted_gains_and_losses %}
+    - {{ g.curated_gene }} - {{ g.type }} - {{ g.min_copies }} kopieën
+{% endfor %}
+{% endif %}
+Tumor specifieke fusies: {% if not report.genomic_analysis or not report.genomic_analysis.tumor_observed_gene_fusions %}geen
+{% else %}{% set fusions = report.genomic_analysis.tumor_observed_gene_fusions %}{% if fusions | length == 1 %}{{ fusions[0].get("fusion") }} fusie
+{% else %}{{ "\n" }}{% for f in fusions %}
+    - {{ f.get("fusion") }} fusie
+{% endfor %}
+{% endif %}
+{% endif %}
+Moleculaire predictie weefsel van origine: {% if report.molecular_tissue_of_origin_prediction %}{{ report.molecular_tissue_of_origin_prediction.cancer_type }}{% if report.molecular_tissue_of_origin_prediction.prediction_percentage is not none %} (likelihood {{ "%.0f"|format(report.molecular_tissue_of_origin_prediction.prediction_percentage * 100) }}%){% endif %}{{ "\n" }}{% endif %}
+{% if report.genomic_analysis %}
+Microsatelliet status: {{ report.genomic_analysis.microsatellite_status_str }}
+Tumor mutational burden (TMB): {{ report.genomic_analysis.tumor_mutational_burden_str }}
+Tumor mutational load (TML): {{ report.genomic_analysis.tumor_mutational_load_str }}
+Homologe recombinatie status: {{ report.genomic_analysis.hrd_status_str }}
+Tumorspecifieke virale inserties: {% if not report.genomic_analysis or not report.genomic_analysis.tumor_observed_viral_insertions %}geen
+{% elif report.genomic_analysis.tumor_observed_viral_insertions | length == 1 %}{{ report.genomic_analysis.tumor_observed_viral_insertions[0].get("virus") }} - {{ report.genomic_analysis.tumor_observed_viral_insertions[0].get("interpretation") }}
+{% else %}{{ "\n" }}{% for vi in report.genomic_analysis.tumor_observed_viral_insertions %}
+    - {{ vi.get("virus") }} - {{ vi.get("interpretation") }}
+{% endfor %}{% endif %}{% endif %}
+
+{% if report.genomic_analysis and report.genomic_analysis.tumor_purity < 0.20 %}
+Opmerking: vanwege de relatief lage tumor purity ({{ "%.0f"|format(report.genomic_analysis.tumor_purity * 100)}}%) kunnen (subclonale) DNA afwijkingen zijn gemist.\n
+{% endif %}
+Conclusie
+Aanvulling ({{ today }}): Verslag is aangevuld met uitslag whole genome sequencing (WGS) uitgevoerd door Hartwig Medical Foundation op corresponderend vriesmateriaal{% if report.genomic_analysis %} (tumor purity {{ "%.0f"|format(report.genomic_analysis.tumor_purity * 100) if report.genomic_analysis.tumor_purity <= 1 else report.genomic_analysis.tumor_purity }}%){% endif %} onder HMF sample ID {{ report.reporting_id }}. Zie samenvatting onder bovenstaande rubriek Moleculair onderzoek.
+{% endif %}
+`;
+
+    // ── DOM refs ───────────────────────────────────────────────────────────────
+    const status = document.getElementById("status");
+    const error = document.getElementById("error");
+    const ui = document.getElementById("ui");
+    const convertBtn = document.getElementById("convertBtn");
+    const outputSection = document.getElementById("outputSection");
+    const outputPreview = document.getElementById("outputPreview");
+    const downloadBtn = document.getElementById("downloadBtn");
+    const wordBtn = document.getElementById("wordBtn");
+    const fileInput = document.getElementById("fileInput");
+
+    let pyodide = null;
+    let renderedOutput = "";
+    let currentSampleId = "N/A";
+
+    // ── Today's date in DD-MM-YYYY ─────────────────────────────────────────────
+    function todayDutch() {
+      const d = new Date();
+      const dd = String(d.getDate()).padStart(2, '0');
+      const mm = String(d.getMonth() + 1).padStart(2, '0');
+      const yyyy = d.getFullYear();
+      return `${dd}-${mm}-${yyyy}`;
+    }
+
+    // ── Init Pyodide ───────────────────────────────────────────────────────────
+    async function main() {
+      try {
+        pyodide = await loadPyodide();
+        status.textContent = "Packages installeren (pydantic, jinja2)...";
+        await pyodide.loadPackage("micropip");
+        await pyodide.runPythonAsync(`
+import micropip
+await micropip.install(["pydantic", "jinja2"])
+        `);
+
+        pyodide.globals.set("TEMPLATE_STR", TEMPLATE);
+
+        await pyodide.runPythonAsync(`
+import json
+import datetime as dt
+from pydantic import BaseModel, Field, computed_field, model_validator, field_validator
+from pydantic.alias_generators import to_camel
+from jinja2 import BaseLoader, Environment
+
+GENES_NO_SHOW_BIALLELIC_MSG = ["ABL1", "ACVR1", "AKT1", "AKT2", "AKT3", "ALB", "ALK", "AR", "ARAF", "ARID5B", "AXL", "BCL2", "BRAF", "CACNA1D", "CALR", "CARD11", "CBL", "CCND1", "CD79A", "CD79B", "CDK4", "CDK6", "CHD4", "COL2A1", "CRLF2", "CRNKL1", "CSF1R", "CSF3R", "CTNNB1", "CXCR4", "DDR2", "DGCR8", "EEF1A1", "EGFR", "EIF1AX", "EPAS1", "EPOR", "ERBB2", "ERBB3", "ERG", "ESR1", "EZH2", "FGFR1", "FGFR2", "FGFR3", "FGFR4", "FLT3", "FLT4", "FNTB", "FOXA1", "FOXA2", "FOXL2", "FUBP1", "GATA2", "GNA11", "GNAQ", "GNAS", "GSK3B", "GTF2I", "H1-2", "H3-3A", "H3-3B", "H3C13", "H3C2", "H3C3", "HIF1A", "HRAS", "IDH1", "IDH2", "IGLL5", "IKBKB", "IL6ST", "IL7R", "IRS2", "JAK2", "JAK3", "KCNJ5", "KDR", "KIT", "KLF5", "KMT2A", "KNSTRN", "KRAS", "LRIG2", "LRIG3", "MAP2K1", "MAP2K2", "MAP3K13", "MET", "MITF", "MPL", "MTOR", "MYD88", "MYOD1", "NCOA2", "NFE2L2", "NOTCH3", "NOTCH4", "NPM1", "NRAS", "NSD2", "NT5C2", "NTRK1", "NTRK2", "NTRK3", "OR11H1", "PAX5", "PDGFRA", "PDGFRB", "PDYN", "PIK3CA", "PIK3CB", "PIM1", "PLCG1", "PPM1D", "PPP1R15A", "PREX2", "PRKACA", "PTK2", "PTPN11", "RAC1", "RAD21", "RAF1", "RET", "RHOA", "ROS1", "SERPINB3", "SERPINB4", "SETBP1", "SF3B1", "SLCO1B1", "SMC3", "SMO", "SMTNL2", "SPOP", "SRC", "SRSF2", "STAT3", "TERT", "TG", "TOP2A", "TPMT", "TRIM51", "TSHR", "TYMS", "U2AF1", "USP8", "USP9X", "WEE1", "XPO1", "XRCC1", "ZIM3"]
+
+class ReportModel(BaseModel):
+    model_config = {
+        "alias_generator": to_camel,
+        "populate_by_name": True,
+    }
+
+class TumorVariant(ReportModel):
+    curated_gene: str
+    driver: str
+    hgvs_coding_impact: str
+    hgvs_protein_impact: str
+    t_vaf: str = Field(alias="tVAF")
+    biallelic: bool
+    
+    @computed_field
+    @property
+    def showBiallelicMessage(self) -> bool:
+        return False if self.curated_gene in GENES_NO_SHOW_BIALLELIC_MSG else True
+        
+
+class GainOrLoss(ReportModel):
+    chromosome: str
+    region: str
+    gene: str
+    curated_gene: str
+    type: str | None = None
+    min_copies: str | None = None
+    max_copies: str | None = None
+    chromosome_arm_copies: str | None = None
+
+class MolecularTissueOfOriginPrediction(ReportModel):
+    cancer_type: str
+    prediction_percentage: float | None = None
+
+class GenomicAnalysis(ReportModel):
+    tumor_purity: float
+    microsatellite_status: str
+    tumor_mutational_burden: str | None
+    tumor_mutational_load: str | int | None
+    hrd_value: str | None
+    hrd_status: str
+    tumor_observed_variants: list[TumorVariant]
+    tumor_observed_gains_and_losses: list[GainOrLoss]
+    tumor_observed_homozygous_disruptions: list[GainOrLoss]
+    tumor_observed_gene_fusions: list[dict] = Field(default_factory=list)
+    tumor_observed_viral_insertions: list[dict] = Field(default_factory=list)
+
+    @computed_field
+    @property
+    def sorted_gains_and_losses(self) -> list[GainOrLoss]:
+        order = {"FULL_GAIN": 0, "PARTIAL_GAIN": 1, "FULL_LOSS": 2, "PARTIAL_LOSS": 3}
+        for item in self.tumor_observed_homozygous_disruptions:
+            item.type = "FULL_LOSS"
+            item.min_copies = "0"
+        all_gains_losses = self.tumor_observed_gains_and_losses + self.tumor_observed_homozygous_disruptions
+        result = sorted(
+            all_gains_losses,
+            key=lambda x: order.get(x.type.upper(), 999)
+        )
+        return [item.model_copy(update={"type": item.type.replace("FULL_LOSS", "COMPLETE_LOSS").replace("_", " ").lower()}) for item in result]
+
+    @computed_field
+    @property
+    def microsatellite_status_str(self) -> str:
+        mapping = {"MSS": "stabiel (MSS)", "MSI": "instabiel (MSI)", "UNKNOWN": "Niet beoordeelbaar"}
+        return mapping.get(self.microsatellite_status.upper(), self.microsatellite_status)
+
+    @computed_field
+    @property
+    def hrd_status_str(self) -> str:
+        mapping = {"HR_PROFICIENT": "HR-proficient (HRP)", "HR_DEFICIENT": "HR-deficient (HRD)", "UNKNOWN": "Niet beoordeelbaar"}
+        return mapping.get(self.hrd_status.upper(), self.hrd_status)
+
+    @computed_field
+    @property
+    def tumor_mutational_burden_str(self) -> str:
+        v = self.tumor_mutational_burden
+        return "Niet beoordeelbaar" if v is None else f"{v} varianten/Mb"
+
+    @computed_field
+    @property
+    def tumor_mutational_load_str(self) -> str:
+        v = self.tumor_mutational_load
+        return "Niet beoordeelbaar" if v is None else f"{v} somatische varianten"
+
+    @field_validator("hrd_value", mode="before")
+    @classmethod
+    def null_to_na(cls, v):
+        return "Niet beoordeelbaar" if v is None else v
+
+class Report(ReportModel):
+    reporting_id: str | None = Field(default="N/A")
+    reason: str | None = None
+    fail_explanation: dict | None = Field(alias="failExplanation", default=None)
+    genomic_analysis: GenomicAnalysis | None = None
+    molecular_tissue_of_origin_prediction: MolecularTissueOfOriginPrediction | None = None
+    
+    @model_validator(mode="before")
+    @classmethod
+    def extract_reporting_id(cls, data: dict) -> dict:
+        if "reporting_id" not in data and "reportingId" not in data:
+            patient = data.get("patientData") or data.get("patient_data", {})
+            data["reporting_id"] = patient.get("reportingId") or patient.get("reporting_id", "N/A")
+        return data
+
+def convert(json_str: str, today: str, filename_id: str) -> str:
+    data = json.loads(json_str)
+
+    report = Report.model_validate(data)
+
+    if report.reporting_id and filename_id.startswith(report.reporting_id):
+        report.reporting_id = filename_id
+
+    if report.genomic_analysis:
+        if report.genomic_analysis.tumor_observed_variants:
+            report.genomic_analysis.tumor_observed_variants = [
+                v for v in report.genomic_analysis.tumor_observed_variants
+                if v.driver.upper() == "HIGH"
+            ]
+        
+        if report.genomic_analysis.tumor_observed_gene_fusions:
+            report.genomic_analysis.tumor_observed_gene_fusions = [
+                f for f in report.genomic_analysis.tumor_observed_gene_fusions
+                if f.get("driver", "").upper() == "HIGH"
+            ]
+
+    if report.molecular_tissue_of_origin_prediction and report.molecular_tissue_of_origin_prediction.cancer_type.lower() == "results inconclusive":
+        report.molecular_tissue_of_origin_prediction.cancer_type = "niet conclusief"
+
+    env = Environment(loader=BaseLoader(), trim_blocks=True, lstrip_blocks=True)
+    template = env.from_string(TEMPLATE_STR)
+    
+    text = template.render(report=report, today=today)
+    return json.dumps({"text": text, "sample_id": report.reporting_id})
+        `);
+
+        status.textContent = "Status: Ready";
+        ui.classList.remove("hidden");
+        fileInput.addEventListener("change", () => {
+          convertBtn.disabled = fileInput.files.length === 0;
+        });
+
+      } catch (e) {
+        status.textContent = "Status: Failed loading pyodide";
+        error.textContent = e.toString();
+      }
+    }
+
+    // ── Convert ────────────────────────────────────────────────────────────────
+    convertBtn.addEventListener("click", async () => {
+      error.textContent = "";
+      outputSection.classList.add("hidden");
+      const file = fileInput.files[0];
+      if (!file) return;
+      const sample_id_filename = file.name.split('_')[2];
+
+      const jsonStr = await file.text();
+      try {
+        pyodide.globals.set("_json_input", jsonStr);
+        pyodide.globals.set("_today", todayDutch());
+        pyodide.globals.set("_filename_id", sample_id_filename);
+        const jsonResultStr = await pyodide.runPythonAsync(`convert(_json_input, _today, _filename_id)`);
+        const result = JSON.parse(jsonResultStr);
+        renderedOutput = result.text;
+        currentSampleId = result.sample_id;
+        outputPreview.value = renderedOutput;
+        outputSection.classList.remove("hidden");
+      } catch (e) {
+        error.textContent = "Fout: " + e.toString();
+      }
+    });
+
+    // ── Download TXT ───────────────────────────────────────────────────────────
+    downloadBtn.addEventListener("click", () => {
+      const currentText = outputPreview.value;
+      const blob = new Blob([currentText], { type: "text/plain" });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = `WGS_Rapport_${currentSampleId}_${todayDutch().replace(/-/g, '')}.txt`;
+      a.click();
+      URL.revokeObjectURL(url);
+    });
+
+    // ── Export to Word ─────────────────────────────────────────────────────────
+    wordBtn.addEventListener("click", async () => {
+      const currentText = outputPreview.value;
+      if (!currentText) return;
+      const { Document, Packer, Paragraph, TextRun, AlignmentType } = docx;
+
+      const paragraphs = currentText.split('\n').map(line => {
+        let leftIndent = 0;
+        const spaceMatch = line.match(/^ {1,}/);
+        if (spaceMatch) {
+          const numSpaces = spaceMatch[0].length;
+          leftIndent = Math.round((numSpaces / 4) * 720);
+          line = line.substring(numSpaces);
+        }
+
+        return new Paragraph({
+          children: [new TextRun({ text: line, size: 22, font: 'Times New Roman' })],
+          indent: leftIndent > 0 ? { left: leftIndent } : undefined,
+          alignment: AlignmentType.JUSTIFIED
+        });
+      });
+
+      const doc = new Document({ sections: [{ children: paragraphs }] });
+      const blob = await Packer.toBlob(doc);
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = `WGS_Rapport_${currentSampleId}_${todayDutch().replace(/-/g, '')}.docx`;
+      a.click();
+      URL.revokeObjectURL(url);
+    });
+
+    main();
+  </script>
+</body>
+
+</html>
