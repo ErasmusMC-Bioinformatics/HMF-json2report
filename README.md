@@ -1,5 +1,8 @@
 # Changelog
 
+## V1.1.1
+- Change "UNKNOWN" values to 'N/A'
+
 ## V1.1.0
 - Handle new "UNKNOWN" and null values with low tumor purity (<20%)
 

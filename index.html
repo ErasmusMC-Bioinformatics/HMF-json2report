@@ -86,7 +86,7 @@
 
 <body>
   <h1>Hartwig WGS JSON → txt/docx</h1>
-  <p id="version">v1.1.0 (19.06.26)</p>
+  <p id="version">v1.1.1 (23.06.26)</p>
 
   <p id="privacy-warning">🔒 Data wordt lokaal verwerkt en verlaat uw computer niet.</p>
 
@@ -94,7 +94,7 @@
   <p id="error"></p>
 
   <div id="ui" class="hidden">
-    <label for="fileInput">Upload JSON bestand:</label><br /><br />
+    <label for="fileInput">Selecteer JSON bestand:</label><br /><br />
     <input type="file" id="fileInput" accept=".json" />
     <br /><br />
     <button id="convertBtn" disabled>Converteer</button>
@@ -123,17 +123,23 @@ Verklaring: {{ exp if exp else 'Geen verklaring' }}
 {% endif %}
 {% else %}
 Aanvulling ({{ today }}): Uitslag whole genome sequencing (WGS) uitgevoerd door Hartwig Medical Foundation op corresponderend vriesmateriaal{% if report.genomic_analysis %} (tumor purity {{ "%.0f"|format(report.genomic_analysis.tumor_purity * 100)}}%){% endif %} onder HMF sample ID {{ report.reporting_id }}. Onderstaand een samenvatting, het volledige rapport is beschikbaar onder multimedia in HIX.
-Tumor specifieke varianten met high driver likelihood: {% if not report.genomic_analysis or not report.genomic_analysis.tumor_observed_variants %}geen
+Tumorspecifieke varianten met high driver likelihood: {% if not
+report.genomic_analysis or not report.genomic_analysis.tumor_observed_variants
+%}{{ report.genomic_analysis.no_data_str if report.genomic_analysis else "geen" }}
 {% else %}{{ "\n" }}{% for v in report.genomic_analysis.tumor_observed_variants %}
 - {{ v.curated_gene }} {{ v.hgvs_coding_impact }}; {{ v.hgvs_protein_impact }} (tVAF {{ v.t_vaf }}{% if v.showBiallelicMessage %}; {% if v.biallelic %}bi-allelische inactivatie{% else %}geen bi-allelische inactivatie{% endif %}{% endif %})
 {% endfor %}
 {% endif %}
-Tumorspecifieke copy number veranderingen (gains/ losses): {% if not report.genomic_analysis or not report.genomic_analysis.sorted_gains_and_losses %}geen
+Tumorspecifieke copy number veranderingen (gains/ losses): {% if not
+report.genomic_analysis or not report.genomic_analysis.sorted_gains_and_losses
+%}{{ report.genomic_analysis.no_data_str if report.genomic_analysis else "geen" }}
 {% else %}{{ "\n" }}{% for g in report.genomic_analysis.sorted_gains_and_losses %}
     - {{ g.curated_gene }} - {{ g.type }} - {{ g.min_copies }} kopieën
 {% endfor %}
 {% endif %}
-Tumor specifieke fusies: {% if not report.genomic_analysis or not report.genomic_analysis.tumor_observed_gene_fusions %}geen
+Tumorspecifieke fusies: {% if not report.genomic_analysis or not
+report.genomic_analysis.tumor_observed_gene_fusions
+%}{{ report.genomic_analysis.no_data_str if report.genomic_analysis else "geen" }}
 {% else %}{% set fusions = report.genomic_analysis.tumor_observed_gene_fusions %}{% if fusions | length == 1 %}{{ fusions[0].get("fusion") }} fusie
 {% else %}{{ "\n" }}{% for f in fusions %}
     - {{ f.get("fusion") }} fusie
@@ -146,7 +152,9 @@ Microsatelliet status: {{ report.genomic_analysis.microsatellite_status_str }}
 Tumor mutational burden (TMB): {{ report.genomic_analysis.tumor_mutational_burden_str }}
 Tumor mutational load (TML): {{ report.genomic_analysis.tumor_mutational_load_str }}
 Homologe recombinatie status: {{ report.genomic_analysis.hrd_status_str }}
-Tumorspecifieke virale inserties: {% if not report.genomic_analysis or not report.genomic_analysis.tumor_observed_viral_insertions %}geen
+Tumorspecifieke virale inserties: {% if not report.genomic_analysis or not
+report.genomic_analysis.tumor_observed_viral_insertions
+%}{{ report.genomic_analysis.no_data_str if report.genomic_analysis else "geen" }}
 {% elif report.genomic_analysis.tumor_observed_viral_insertions | length == 1 %}{{ report.genomic_analysis.tumor_observed_viral_insertions[0].get("virus") }} - {{ report.genomic_analysis.tumor_observed_viral_insertions[0].get("interpretation") }}
 {% else %}{{ "\n" }}{% for vi in report.genomic_analysis.tumor_observed_viral_insertions %}
     - {{ vi.get("virus") }} - {{ vi.get("interpretation") }}
@@ -255,6 +263,16 @@ class GenomicAnalysis(ReportModel):
 
     @computed_field
     @property
+    def low_purity(self) -> bool:
+        return self.tumor_purity < 0.20
+
+    @computed_field
+    @property
+    def no_data_str(self) -> str:
+        return "N/A" if self.low_purity else "geen"
+
+    @computed_field
+    @property
     def sorted_gains_and_losses(self) -> list[GainOrLoss]:
         order = {"FULL_GAIN": 0, "PARTIAL_GAIN": 1, "FULL_LOSS": 2, "PARTIAL_LOSS": 3}
         for item in self.tumor_observed_homozygous_disruptions:
@@ -270,31 +288,31 @@ class GenomicAnalysis(ReportModel):
     @computed_field
     @property
     def microsatellite_status_str(self) -> str:
-        mapping = {"MSS": "stabiel (MSS)", "MSI": "instabiel (MSI)", "UNKNOWN": "Niet beoordeelbaar"}
+        mapping = {"MSS": "stabiel (MSS)", "MSI": "instabiel (MSI)", "UNKNOWN": "N/A"}
         return mapping.get(self.microsatellite_status.upper(), self.microsatellite_status)
 
     @computed_field
     @property
     def hrd_status_str(self) -> str:
-        mapping = {"HR_PROFICIENT": "HR-proficient (HRP)", "HR_DEFICIENT": "HR-deficient (HRD)", "UNKNOWN": "Niet beoordeelbaar"}
+        mapping = {"HR_PROFICIENT": "HR-proficient (HRP)", "HR_DEFICIENT": "HR-deficient (HRD)", "UNKNOWN": "N/A"}
         return mapping.get(self.hrd_status.upper(), self.hrd_status)
 
     @computed_field
     @property
     def tumor_mutational_burden_str(self) -> str:
         v = self.tumor_mutational_burden
-        return "Niet beoordeelbaar" if v is None else f"{v} varianten/Mb"
+        return "N/A" if v is None else f"{v} varianten/Mb"
 
     @computed_field
     @property
     def tumor_mutational_load_str(self) -> str:
         v = self.tumor_mutational_load
-        return "Niet beoordeelbaar" if v is None else f"{v} somatische varianten"
+        return "N/A" if v is None else f"{v} somatische varianten"
 
     @field_validator("hrd_value", mode="before")
     @classmethod
     def null_to_na(cls, v):
-        return "Niet beoordeelbaar" if v is None else v
+        return "N/A" if v is None else v
 
 class Report(ReportModel):
     reporting_id: str | None = Field(default="N/A")
